@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "worldcup-edge"
+version = "0.2.0"
+description = "World Cup 2026 football analytics: RAG-grounded Claude match predictions and bookmaker arbitrage scanning."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.105",
+    "chromadb>=1.0",
+    "langchain-chroma>=1.0",
+    "langchain-core>=1.0",
+    "langchain-huggingface>=1.0",
+    "langchain-text-splitters>=1.0",
+    "sentence-transformers>=3.0",
+    "python-dotenv>=1.0",
+    "requests>=2.31",
+    "numpy>=1.26",
+    "scipy>=1.11",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+wm = "wm.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E731"]  # small named lambdas are the clearest way to express market predicates

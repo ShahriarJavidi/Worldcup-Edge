@@ -1,0 +1,16 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Node
+node_modules/
+
+# Local data: knowledge base, scraped odds, screenshots
+rag_chroma_db*/
+vector_store/
+data/
