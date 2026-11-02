@@ -144,7 +144,7 @@ flowchart LR
     end
     A --> KB[(Chroma<br/>MiniLM embeddings)]
     D --> KB
-    S -- --raw --> KB
+    S -->|"--raw"| KB
     KB --> R[retrieval<br/>multi-query, de-duplicated]
     R --> P[predict<br/>Claude, JSON schema]
     P --> M[derived markets<br/>+ fair odds]
