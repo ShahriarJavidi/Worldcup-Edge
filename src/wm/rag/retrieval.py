@@ -2,22 +2,37 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from wm.rag.store import Hit, KnowledgeBase
 
 
-def match_context(kb: KnowledgeBase, team_a: str, team_b: str, k: int = 8) -> list[Hit]:
+def match_context(
+    kb: KnowledgeBase,
+    team_a: str,
+    team_b: str,
+    k: int = 8,
+    *,
+    keep: Callable[[Hit], bool] | None = None,
+) -> list[Hit]:
     """Gather context for a fixture from several angles and merge the results.
 
     A single "A vs B" query tends to be dominated by whichever team has more
     stored text, so each team is also queried on its own. Results are
     de-duplicated and ordered by similarity.
+
+    ``keep`` drops chunks before ranking (the evaluation uses it to hide
+    anything ingested after kickoff); each query over-fetches to compensate.
     """
     per_query = max(2, k // 2)
     queries = [f"{team_a} vs {team_b}", f"{team_a} form injuries squad", f"{team_b} form injuries squad"]
 
     best: dict[str, Hit] = {}
     for query in queries:
-        for hit in kb.search(query, k=per_query):
+        hits = kb.search(query, k=per_query * 4 if keep else per_query)
+        if keep:
+            hits = [h for h in hits if keep(h)][:per_query]
+        for hit in hits:
             seen = best.get(hit.text)
             if seen is None or hit.distance < seen.distance:
                 best[hit.text] = hit

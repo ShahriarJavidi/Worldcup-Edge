@@ -87,7 +87,39 @@ wm predict Spain Uruguay --show-sources     # list the chunks that were retrieve
 wm predict Spain Uruguay --no-rag           # Claude's general knowledge only
 ```
 
-### 3. Scan for arbitrage
+### 3. Evaluate on the finished tournament
+
+The 2026 World Cup is over, so every prediction can be scored. `wm eval` replays `wm predict` on every match as if before kickoff and scores the probabilities against the real 90-minute results.
+
+```bash
+wm eval fetch                                   # real results from API-Football → eval/wc2026_results.csv
+wm eval run --dry-run                           # how many requests a run would send
+wm eval run --limit 5                           # cheap smoke test
+wm eval run                                     # default model and effort, with retrieval
+wm eval run --no-rag
+wm eval run --model claude-sonnet-5-5 && wm eval run --model claude-haiku-5-5
+wm eval report                                  # leaderboard, RAG vs no-RAG, model vs model
+wm eval check --set-baseline                    # record the production scores as the CI ceiling
+```
+
+**Scores.** 1X2 is scored by Brier score (squared error summed over the three outcomes; guessing 1/3 each scores 0.667) and log loss (guessing scores ln 3 = 1.099). Over 2.5, Over 3.5 and BTTS get binary Brier scores (guessing 50% scores 0.25). Lower is better. Comparisons are **paired**: the report bootstraps the per-match difference between two runs over the matches both scored, and gives a 95% interval. That matters with only 104 matches, where differences between configurations are often within noise.
+
+**Cost and latency.** Each request's token usage is priced at the model that actually answered (it can differ after a refusal fallback), and its wall-clock time is recorded. Prices are in `wm/evaluation/runner.py`.
+
+**No peeking.** Retrieval only sees chunks ingested before the match's kickoff. Chunks from before `ingested_at` existed have no date. Undated team dossiers stay visible, because they were fetched before the tournament. Undated match reports are hidden. The other leak is the model's own training data: a model whose training cutoff falls after a match may already know its result. The report splits scores into group stage and knockouts so you can spot this.
+
+**Runs are files.** Each configuration writes `eval/runs/<model>_<effort>_<rag|norag>.jsonl`. It holds one record per match: the model's raw output, retrieved sources, tokens, cost and latency. Runs resume where they stopped and retry failures. Every record carries a fingerprint of the system prompt, schema, prompt template, retrieval code, model and effort. A record whose fingerprint no longer matches the code is stale and gets predicted again.
+
+**CI gate.** CI has neither API keys nor your knowledge base, so it runs `wm eval check` on the committed files instead. The check fails in three cases:
+- the production configuration (`DEFAULT_MODEL`, `DEFAULT_EFFORT`, RAG on) has stale or missing predictions, which means the prompt or model changed without a re-run;
+- any gated metric is worse than `eval/gate.json` allows (baseline plus a tolerance of 0.01 by default);
+- the 1X2 Brier score doesn't beat guessing.
+
+Loosening the gate means editing `gate.json`, and that shows up in review. Until `gate.json` exists, the check passes and does nothing.
+
+A full matrix (3 models × RAG on/off × 104 matches) is 624 requests. Run `wm eval run --dry-run` before each configuration.
+
+### 4. Scan for arbitrage
 
 ```bash
 # Scrape every market for one event from Swisslos Sporttip (needs Node and Chrome)
@@ -190,7 +222,7 @@ pytest tests/test_markets.py -k handicap # a subset
 ruff check src tests && ruff format src tests
 ```
 
-The RAG tests build a throwaway knowledge base with the real embedding model, and are skipped if it can't be downloaded. CI (`.github/workflows/ci.yml`) runs lint and tests on every push and pull request.
+The RAG tests build a throwaway knowledge base with the real embedding model, and are skipped if it can't be downloaded. CI (`.github/workflows/ci.yml`) runs lint, tests and the offline evaluation gate on every push and pull request.
 
 ## Troubleshooting
 

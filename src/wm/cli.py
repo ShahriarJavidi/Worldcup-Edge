@@ -7,6 +7,7 @@ wm stats       show what the knowledge base contains
 wm forget      delete one source from the knowledge base
 wm reindex     upgrade chunks stored by older versions
 wm predict     probabilities for a fixture, grounded in the knowledge base
+wm eval        backtest predictions on the finished tournament (fetch | run | report | check)
 wm arb scan    arbitrage scan of a scraped odds CSV
 wm arb dutch   cross-book 1X2 arbitrage
 """
@@ -171,6 +172,120 @@ def cmd_predict(args: argparse.Namespace, settings: Settings) -> None:
         print(f"\n({len(hits)} knowledge-base chunks used; --show-sources to list them)")
 
 
+# --------------------------------------------------------------------------- evaluation
+def _eval_paths(args: argparse.Namespace):
+    from pathlib import Path
+
+    root = Path(args.eval_dir)
+    return root / "wc2026_results.csv", root / "runs", root / "gate.json"
+
+
+def cmd_eval_fetch(args: argparse.Namespace, settings: Settings) -> None:
+    from wm.evaluation.fixtures import fetch_fixtures, save_fixtures
+    from wm.football import APIFootballClient
+
+    results, _, _ = _eval_paths(args)
+    fixtures, warnings = fetch_fixtures(APIFootballClient(settings.require_football_key()))
+    for warning in warnings:
+        print(f"  ! {warning}")
+    if not fixtures:
+        raise ValueError("API-Football returned no finished World Cup 2026 matches.")
+    save_fixtures(fixtures, results)
+    groups = sum(f.is_group for f in fixtures)
+    print(f"Wrote {len(fixtures)} matches ({groups} group, {len(fixtures) - groups} knockout) to {results}")
+
+
+def cmd_eval_run(args: argparse.Namespace, settings: Settings) -> None:
+    from dataclasses import replace
+
+    from wm.evaluation import runner
+    from wm.evaluation.fixtures import load_fixtures
+    from wm.evaluation.leakage import visible_before
+    from wm.llm import Claude
+
+    results, runs_dir, _ = _eval_paths(args)
+    fixtures = load_fixtures(results)
+    if args.limit:
+        fixtures = fixtures[: args.limit]
+    config = runner.RunConfig(
+        model=args.model or settings.model, effort=args.effort or settings.effort, rag=not args.no_rag, k=args.k
+    )
+    path = runner.run_path(runs_dir, args.label or config.label)
+    todo = runner.pending(fixtures, runner.load_records(path), runner.fingerprint(config))
+    print(f"{config.label}: {len(todo)} of {len(fixtures)} matches to predict → {path}")
+    if args.dry_run or not todo:
+        return
+
+    retrieve = None
+    if config.rag:
+        from wm.rag.retrieval import match_context
+
+        kb = _kb(settings, args.db)
+        if not kb.exists:
+            raise ValueError(f"No knowledge base at {kb.path}; use --no-rag or --db.")
+        retrieve = lambda f: match_context(kb, f.team_a, f.team_b, k=config.k, keep=visible_before(f.kickoff_at))  # noqa: E731
+
+    by_id = {f.match_id: f for f in fixtures}
+    done = [0]
+
+    def progress(rec: runner.Record) -> None:
+        done[0] += 1
+        f = by_id[rec.match_id]
+        status = f"error: {rec.error}" if rec.error else f"{rec.latency_s:.1f}s"
+        print(f"  [{done[0]:3d}/{len(todo)}] {f.team_a} vs {f.team_b}: {status}", flush=True)
+
+    llm = Claude(replace(settings, model=config.model, effort=config.effort))
+    records = runner.run(llm, config, fixtures, path, retrieve=retrieve, workers=args.workers, on_record=progress)
+    failed = sum(not r.ok for r in records)
+    cost = sum(r.cost_usd or 0 for r in records)
+    print(f"Done: {len(records) - failed} predicted, {failed} failed, ${cost:.2f}. Re-run to retry failures.")
+
+
+def cmd_eval_report(args: argparse.Namespace, settings: Settings) -> None:
+    import json
+
+    from wm.evaluation.fixtures import load_fixtures
+    from wm.evaluation.report import render, score_run, summary_json
+
+    results, runs_dir, _ = _eval_paths(args)
+    fixtures = load_fixtures(results)
+    paths = sorted(runs_dir.glob("*.jsonl"))
+    if not paths:
+        raise ValueError(f"No run files in {runs_dir}. Run `wm eval run` first.")
+    scores = [score_run(p, fixtures) for p in paths]
+    print(render(scores, fixtures))
+    if args.json:
+        with open(args.json, "w", encoding="utf-8") as fh:
+            json.dump(summary_json(scores), fh, indent=2)
+        print(f"Wrote {args.json}")
+
+
+def cmd_eval_check(args: argparse.Namespace, settings: Settings) -> None:
+    from wm.evaluation.fixtures import load_fixtures
+    from wm.evaluation.report import check, production_config, score_run, write_gate
+    from wm.evaluation.runner import run_path
+
+    results, runs_dir, gate_path = _eval_paths(args)
+    if not args.set_baseline and not gate_path.exists():
+        print(f"No {gate_path}; nothing to check. Create one with `wm eval check --set-baseline`.")
+        return
+    fixtures = load_fixtures(results)
+    if args.set_baseline:
+        path = run_path(runs_dir, production_config().label)
+        if not path.exists():
+            raise ValueError(f"No production run at {path}. Run `wm eval run` first.")
+        score = score_run(path, fixtures)
+        if score.stale or score.n < len(fixtures):
+            raise ValueError(f"{path} is incomplete or stale; finish `wm eval run` before setting a baseline.")
+        gate = write_gate(gate_path, score, args.tolerance)
+        print(f"Wrote {gate_path}: " + ", ".join(f"{m} ≤ {v}" for m, v in gate["max"].items()))
+        return
+    problems = check(gate_path, runs_dir, fixtures)
+    if problems:
+        raise RuntimeError("evaluation gate failed:\n  - " + "\n  - ".join(problems))
+    print(f"Evaluation gate passed ({production_config().label}).")
+
+
 # --------------------------------------------------------------------------- arbitrage
 def cmd_arb_scan(args: argparse.Namespace, settings: Settings) -> None:
     from wm.arbitrage import load_odds_csv, scan
@@ -274,6 +389,33 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-k", type=int, default=8, help="chunks of context to retrieve")
     p.add_argument("--show-sources", action="store_true", help="list retrieved chunks")
     p.set_defaults(func=cmd_predict)
+
+    ev = sub.add_parser("eval", help="backtest predictions on the finished tournament")
+    ev.add_argument("--eval-dir", default="eval", help="fixtures, run files and gate (default: ./eval)")
+    ev_sub = ev.add_subparsers(dest="eval_command", required=True, metavar="STEP")
+
+    p = ev_sub.add_parser("fetch", help="download real 90-minute results from API-Football")
+    p.set_defaults(func=cmd_eval_fetch)
+
+    p = ev_sub.add_parser("run", help="predict every match as of kickoff (resumable; calls the Anthropic API)")
+    p.add_argument("--model", help="default: $WM_MODEL")
+    p.add_argument("--effort", help="default: $WM_EFFORT")
+    p.add_argument("--no-rag", action="store_true", help="do not use the knowledge base")
+    p.add_argument("-k", type=int, default=8, help="chunks of context to retrieve")
+    p.add_argument("--workers", type=int, default=4, help="concurrent API requests")
+    p.add_argument("--limit", type=int, help="only the first N matches (a cheap smoke test)")
+    p.add_argument("--label", help="run file name (default: model_effort_rag|norag)")
+    p.add_argument("--dry-run", action="store_true", help="show how many requests would be sent, then stop")
+    p.set_defaults(func=cmd_eval_run)
+
+    p = ev_sub.add_parser("report", help="score every run file and compare them")
+    p.add_argument("--json", metavar="PATH", help="also write the summary as JSON")
+    p.set_defaults(func=cmd_eval_report)
+
+    p = ev_sub.add_parser("check", help="CI gate: fail if production predictions are stale or worse than the baseline")
+    p.add_argument("--set-baseline", action="store_true", help="write gate.json from the current production run")
+    p.add_argument("--tolerance", type=float, default=0.01, help="allowed worsening per metric (default 0.01)")
+    p.set_defaults(func=cmd_eval_check)
 
     arb = sub.add_parser("arb", help="arbitrage tools").add_subparsers(
         dest="arb_command", required=True, metavar="TOOL"

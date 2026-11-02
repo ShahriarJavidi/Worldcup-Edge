@@ -108,3 +108,9 @@ def test_reindex_upgrades_legacy_chunks(kb):
     hit = kb.search("Ghana injuries", k=1, where={"kind": KIND_TEAM})[0]
     assert hit.text == "[Team dossier: Ghana]\n" + legacy
     assert kb.reindex() == type(result)(0, 0)  # idempotent
+
+
+def test_match_context_keep_filters_before_ranking(kb):
+    keep = lambda h: h.source != "api_football:Canada"  # noqa: E731
+    sources = {h.source for h in match_context(kb, "Canada", "Spain", k=6, keep=keep)}
+    assert "api_football:Canada" not in sources and "api_football:Spain" in sources

@@ -35,3 +35,8 @@ jobs:
 
       - name: Test
         run: pytest
+
+      # Offline: scores the committed predictions in eval/runs/. Fails if the prompt, schema, retrieval
+      # code or default model changed without a fresh `wm eval run`, or if the scores got worse.
+      - name: Evaluation gate
+        run: wm eval check
